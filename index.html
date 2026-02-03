@@ -14,13 +14,19 @@
     label { display: grid; gap: 6px; font-size: 14px; }
     input { padding: 10px 12px; border: 1px solid #d7dbe0; border-radius: 10px; font-size: 14px; }
     .checkbox { display: flex; align-items: center; gap: 8px; }
-    .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+    .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; align-items: center; }
     button { padding: 10px 12px; border-radius: 10px; border: 1px solid #d7dbe0; background: #fff; cursor: pointer; }
     button:hover { background: #f2f4f7; }
     .muted { color: #6b7280; font-size: 13px; }
     .log { margin-top: 14px; border: 1px dashed #d7dbe0; border-radius: 12px; padding: 12px; background: #fafafa; }
     .log pre { margin: 0; white-space: pre-wrap; word-break: break-word; font-size: 12px; }
     .embedded-container { border: 1px solid #eef0f3; border-radius: 12px; padding: 12px; min-height: 120px; background: #fff; }
+
+    .pill {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 6px 10px; border: 1px solid #e5e7eb; border-radius: 999px;
+      background: #fff; font-size: 12px; color: #374151;
+    }
 
     @media (max-width: 720px) {
       .row { grid-template-columns: 1fr; }
@@ -33,43 +39,51 @@
     <h1>Test UCPM – CMS form + Embedded form</h1>
 
     <section class="card">
-      <h2>1) Formulario tipo CMS (custom)</h2>
+      <h2>1) Formulario tipo CMS (custom) → Consent Receipt API</h2>
       <p class="muted">
-        Simula el formulario del cliente. Permite probar múltiples envíos y ver si el SDK se bloquea.
+        Envía un receipt a un Collection Point vía <code>/request/v1/consentreceipts</code> usando el JWT del Collection Point como <code>requestInformation</code>.
       </p>
 
       <form id="cmsForm">
         <div class="row">
-          <label>Email
-            <input id="email" type="email" required />
+          <label>Email (identifier)
+            <input id="email" type="email" required placeholder="example@otprivacy.com" />
           </label>
-          <label>Teléfono
-            <input id="phone" type="tel" />
+          <label>Teléfono (Mobile)
+            <input id="phone" type="tel" placeholder="+34..." />
           </label>
         </div>
 
         <div class="row">
-          <label>Nombre
+          <label>Nombre (FirstName)
             <input id="firstName" type="text" />
           </label>
-          <label>Apellido
+          <label>Apellido (LastName)
             <input id="lastName" type="text" />
           </label>
         </div>
 
         <div class="row">
           <label class="checkbox">
-            <input id="marketing" type="checkbox" /> Marketing
+            <input id="marketing" type="checkbox" checked /> Marketing (Purpose #1)
           </label>
           <label class="checkbox">
-            <input id="profiling" type="checkbox" /> Profiling
+            <input id="profiling" type="checkbox" /> Profiling (Purpose #2)
           </label>
         </div>
 
         <div class="actions">
-          <button type="submit">Enviar lead</button>
+          <button type="submit">Enviar lead (API)</button>
           <button type="button" id="btnSubmit3">Enviar 3 veces</button>
           <button type="button" id="btnReset">Reset estado</button>
+          <label class="pill">
+            <input id="isTest" type="checkbox" checked />
+            test=true
+          </label>
+          <label class="pill">
+            <input id="enableLatest" type="checkbox" />
+            enableDataElementDateValidation=true
+          </label>
         </div>
       </form>
 
@@ -81,7 +95,7 @@
 
     <section class="card">
       <h2>2) Embedded Form UCPM</h2>
-      <p class="muted">Aquí se renderiza el formulario estándar de OneTrust.</p>
+      <p class="muted">Aquí se renderiza el formulario estándar de OneTrust (si lo necesitas).</p>
 
       <div id="ucpm-embedded-form" class="embedded-container"></div>
 
@@ -94,69 +108,197 @@
     </section>
 
     <p class="muted">
-      Consejo: abre DevTools → Network y filtra por "onetrust" o "consent" para ver los envíos reales.
+      Consejo: abre DevTools → Network y filtra por <code>consentreceipts</code> para ver el POST. Si falla, mira la respuesta del API en el log.
     </p>
   </main>
 
 <script>
 (function () {
+  // =========================
+  // ✅ CONFIG (EDIT THESE)
+  // =========================
+  const API_URL = "https://privacyportaltrial.onetrust.com/request/v1/consentreceipts";
+
+  // Paste your Collection Point JWT here (requestInformation).
+  // DO NOT COMMIT THIS TOKEN TO GITHUB.
+  const REQUEST_INFORMATION_JWT = "PASTE_YOUR_JWT_HERE";
+
+  // Purpose IDs (from your example)
+  const PURPOSE_MARKETING_ID = "d8aecf6d-3f4a-4354-b752-8a6663b5d83f";
+  const PURPOSE_PROFILING_ID = "eaddf865-9b70-445b-a36c-fdddc9de1697";
+
+  // Transaction type to use when checkbox is checked
+  const CHECKED_TRANSACTION_TYPE = "CONFIRMED";
+
+  // If you want to send "no consent" records for unchecked purposes, set this to true.
+  // Note: your instructions say if purposes array is empty, no receipt will be generated.
+  // By default we only send checked purposes to generate a receipt only for given consents.
+  const INCLUDE_UNCHECKED_PURPOSES = false;
+  const UNCHECKED_TRANSACTION_TYPE = "NOTGIVEN";
+
+  // Optional: geolocation example values (keep blank to omit)
+  const DEFAULT_GEO = {
+    country: "ES",
+    state: "MD",
+    stateName: "Madrid"
+  };
+
+  // =========================
+  // DOM
+  // =========================
   const logEl = document.getElementById("log");
   const form = document.getElementById("cmsForm");
   const btnSubmit3 = document.getElementById("btnSubmit3");
   const btnReset = document.getElementById("btnReset");
+  const isTestEl = document.getElementById("isTest");
+  const enableLatestEl = document.getElementById("enableLatest");
+
+  // Inputs
+  const emailEl = document.getElementById("email");
+  const phoneEl = document.getElementById("phone");
+  const firstNameEl = document.getElementById("firstName");
+  const lastNameEl = document.getElementById("lastName");
+  const marketingEl = document.getElementById("marketing");
+  const profilingEl = document.getElementById("profiling");
 
   let submitCounter = 0;
 
   function log(text, obj) {
     const ts = new Date().toISOString();
-    const msg = obj ? text + "\\n" + JSON.stringify(obj, null, 2) : text;
-    logEl.textContent = "[" + ts + "] " + msg + "\\n\\n" + logEl.textContent;
+    const msg = obj ? text + "\n" + JSON.stringify(obj, null, 2) : text;
+    logEl.textContent = "[" + ts + "] " + msg + "\n\n" + logEl.textContent;
     console.log(text, obj || "");
   }
 
-  function getPayload() {
-    return {
-      email: email.value,
-      phone: phone.value,
-      firstName: firstName.value,
-      lastName: lastName.value,
-      marketing: marketing.checked,
-      profiling: profiling.checked,
-      clientSubmitId: crypto.randomUUID(),
-      ts: Date.now()
-    };
+  function buildPurposes() {
+    const purposes = [];
+
+    const marketingChecked = !!marketingEl.checked;
+    const profilingChecked = !!profilingEl.checked;
+
+    if (marketingChecked) {
+      purposes.push({ Id: PURPOSE_MARKETING_ID, TransactionType: CHECKED_TRANSACTION_TYPE });
+    } else if (INCLUDE_UNCHECKED_PURPOSES) {
+      purposes.push({ Id: PURPOSE_MARKETING_ID, TransactionType: UNCHECKED_TRANSACTION_TYPE });
+    }
+
+    if (profilingChecked) {
+      purposes.push({ Id: PURPOSE_PROFILING_ID, TransactionType: CHECKED_TRANSACTION_TYPE });
+    } else if (INCLUDE_UNCHECKED_PURPOSES) {
+      purposes.push({ Id: PURPOSE_PROFILING_ID, TransactionType: UNCHECKED_TRANSACTION_TYPE });
+    }
+
+    return purposes;
   }
 
-  async function fakeSend(payload) {
-    await new Promise(r => setTimeout(r, 300));
-    return { ok: true };
+  function buildRequestBody() {
+    const identifier = (emailEl.value || "").trim();
+
+    const purposes = buildPurposes();
+
+    const body = {
+      identifier,
+      requestInformation: REQUEST_INFORMATION_JWT,
+      purposes,
+      dsDataElements: {
+        Mobile: (phoneEl.value || "").trim(),
+        LastName: (lastNameEl.value || "").trim(),
+        FirstName: (firstNameEl.value || "").trim()
+      }
+    };
+
+    // Optional flags (per your instructions)
+    if (isTestEl.checked) body.test = true;
+    if (enableLatestEl.checked) body.enableDataElementDateValidation = true;
+
+    // Optional geolocation (only include if country is set)
+    // If you want geolocation by purpose, set purposeIds accordingly.
+    if (DEFAULT_GEO && DEFAULT_GEO.country) {
+      body.geolocation = {
+        country: DEFAULT_GEO.country,
+        state: DEFAULT_GEO.state,
+        stateName: DEFAULT_GEO.stateName,
+        // Example: apply geo only to profiling purpose
+        purposeIds: profilingEl.checked ? [PURPOSE_PROFILING_ID] : []
+      };
+    }
+
+    return body;
+  }
+
+  async function sendConsentReceipt(requestBody) {
+    if (!REQUEST_INFORMATION_JWT || REQUEST_INFORMATION_JWT === "PASTE_YOUR_JWT_HERE") {
+      throw new Error("Missing REQUEST_INFORMATION_JWT. Paste your Collection Point JWT into the HTML file.");
+    }
+
+    if (!requestBody.identifier) {
+      throw new Error("Missing identifier (email).");
+    }
+
+    // If purposes is empty, API may accept but it will not generate a receipt (per your docs)
+    if (!Array.isArray(requestBody.purposes) || requestBody.purposes.length === 0) {
+      log("⚠️ purposes[] está vacío → según la doc, NO se generará receipt. Marca al menos un checkbox.");
+    }
+
+    const res = await fetch(API_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(requestBody)
+    });
+
+    const contentType = res.headers.get("content-type") || "";
+    let data = null;
+
+    if (contentType.includes("application/json")) {
+      data = await res.json().catch(() => null);
+    } else {
+      const text = await res.text().catch(() => "");
+      data = text ? { raw: text } : null;
+    }
+
+    if (!res.ok) {
+      const err = new Error("API error: HTTP " + res.status);
+      err.details = data;
+      throw err;
+    }
+
+    return { status: res.status, data };
   }
 
   async function handleSubmit(e) {
     e.preventDefault();
     submitCounter++;
 
-    const payload = getPayload();
-    log("SUBMIT #" + submitCounter, payload);
+    const requestBody = buildRequestBody();
+    // Don't log the full JWT
+    const safeLogBody = JSON.parse(JSON.stringify(requestBody));
+    if (safeLogBody.requestInformation) safeLogBody.requestInformation = "[REDACTED_JWT]";
 
-    if (submitCounter >= 3) {
-      log("⚠️ Simulación: a partir del 3º submit el SDK queda bloqueado");
-      return;
+    log("SUBMIT #" + submitCounter + " → POST " + API_URL, safeLogBody);
+
+    try {
+      const result = await sendConsentReceipt(requestBody);
+      log("✅ Resultado API (ok)", result);
+    } catch (err) {
+      log("❌ Error API", {
+        message: err.message || String(err),
+        details: err.details || null
+      });
     }
-
-    const res = await fakeSend(payload);
-    log("Resultado envío (simulado)", res);
   }
 
   async function submitThreeTimes() {
     for (let i = 0; i < 3; i++) {
       await handleSubmit({ preventDefault() {} });
-      await new Promise(r => setTimeout(r, 500));
+      await new Promise(r => setTimeout(r, 600));
     }
   }
 
   function resetState() {
     submitCounter = 0;
+    logEl.textContent = "";
     log("Estado JS reseteado");
   }
 
@@ -164,7 +306,7 @@
   btnSubmit3.addEventListener("click", submitThreeTimes);
   btnReset.addEventListener("click", resetState);
 
-  log("Página lista para pruebas");
+  log("Página lista para pruebas. Recuerda pegar tu JWT en REQUEST_INFORMATION_JWT (no lo subas a GitHub).");
 })();
 </script>
 
